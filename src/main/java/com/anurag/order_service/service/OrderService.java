@@ -4,9 +4,12 @@ import com.anurag.order_service.dto.OrderRequest;
 import com.anurag.order_service.dto.OrderResponse;
 import com.anurag.order_service.entity.Order;
 import com.anurag.order_service.entity.User;
+import com.anurag.order_service.event.OrderPlacedEvent;
+import com.anurag.order_service.producer.OrderEventProducer;
 import com.anurag.order_service.repository.OrderRepository;
 import com.anurag.order_service.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
@@ -18,11 +21,13 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class OrderService {
 
     private final OrderRepository orderRepository;
     private final UserRepository userRepository;
     private final RestTemplate restTemplate;
+    private final OrderEventProducer orderEventProducer;
 
     @Value("${inventory.service.url}")
     private String inventoryServiceUrl;
@@ -32,7 +37,7 @@ public class OrderService {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
-        // Step 1: Reserve stock via InventorySync
+        // Step 1: Reserve stock via InventorySync (synchronous REST)
         boolean reserved = reserveStock(request.getProductId(), request.getQuantity());
 
         if (!reserved) {
@@ -50,6 +55,17 @@ public class OrderService {
                 .build();
 
         Order saved = orderRepository.save(order);
+
+        // Step 3: Publish order-placed event to Kafka (async, non-blocking)
+        // Order is already confirmed — Kafka failure does NOT rollback the order
+        orderEventProducer.publishOrderPlaced(OrderPlacedEvent.builder()
+                .orderId(saved.getId())
+                .userId(user.getId())
+                .productId(saved.getProductId())
+                .quantity(saved.getQuantity())
+                .status(saved.getStatus())
+                .placedAt(saved.getCreatedAt())
+                .build());
 
         return mapToResponse(saved);
     }
